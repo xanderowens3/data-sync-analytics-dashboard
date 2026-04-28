@@ -177,8 +177,9 @@ def ghl_get(path, params=None):
 
 def get_google_credentials():
     if GOOGLE_SERVICE_ACCOUNT_JSON:
-        import json
-        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        import json, base64
+        decoded = base64.b64decode(GOOGLE_SERVICE_ACCOUNT_JSON).decode()
+        creds_dict = json.loads(decoded)
         return service_account.Credentials.from_service_account_info(creds_dict, scopes=SHEETS_SCOPE)
     else:
         if not Path(GOOGLE_CREDS_PATH).exists():
