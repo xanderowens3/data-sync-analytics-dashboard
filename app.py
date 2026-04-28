@@ -18,7 +18,7 @@ def sync_client(client):
             capture_output=True,
             text=True,
             cwd=Path(__file__).parent,
-            timeout=600  # 10 minutes for full sync
+            timeout=43200  # 12 hours for full sync
         )
         return jsonify({
             "client": client,
@@ -27,7 +27,7 @@ def sync_client(client):
             "stderr": result.stderr
         })
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "Script timed out after 10 minutes"}), 408
+        return jsonify({"error": "Script timed out after 12 hours"}), 408
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -40,7 +40,7 @@ def update_client(client):
             capture_output=True,
             text=True,
             cwd=Path(__file__).parent,
-            timeout=240  # 4 minutes timeout
+            timeout=7200  # 2 hours for update
         )
         return jsonify({
             "client": client,
@@ -49,7 +49,7 @@ def update_client(client):
             "stderr": result.stderr
         })
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "Script timed out after 4 minutes"}), 408
+        return jsonify({"error": "Script timed out after 2 hours"}), 408
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
