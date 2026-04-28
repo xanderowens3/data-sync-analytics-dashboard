@@ -171,6 +171,9 @@ def get_sheet_id(sheets, sheet_name):
         if sheet['properties']['title'] == sheet_name:
             return sheet['properties']['sheetId']
     raise ValueError(f"Sheet '{sheet_name}' not found")
+
+
+def get_google_credentials():
     if GOOGLE_SERVICE_ACCOUNT_JSON:
         import json, base64
         decoded = base64.b64decode(GOOGLE_SERVICE_ACCOUNT_JSON).decode()
@@ -180,6 +183,7 @@ def get_sheet_id(sheets, sheet_name):
         if not Path(GOOGLE_CREDS_PATH).exists():
             raise FileNotFoundError(f"Service account JSON not found at {GOOGLE_CREDS_PATH}")
         return service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH, scopes=SHEETS_SCOPE)
+
 
 def get_sheets_service():
     creds = get_google_credentials()
