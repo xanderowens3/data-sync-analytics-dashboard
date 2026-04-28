@@ -103,14 +103,13 @@ def parse_iso(s):
         return None
 
 
-def discover_active_campaigns():
+def discover_filtered_campaigns():
     """
-    Fetch all campaigns from SmartLead, filter to:
-      1. Status = ACTIVE
-      2. updated_at within ACTIVE_WINDOW_DAYS
-      3. Name matches CAMPAIGN_FILTER keywords (if set)
+    Fetch all campaigns from SmartLead, filter by CAMPAIGN_FILTER keywords.
+    If CAMPAIGN_FILTER is empty, returns ALL campaigns.
+    Returns list of (campaign_id, campaign_name) tuples.
     """
-    log(f"Discovering active campaigns (filter: '{CAMPAIGN_FILTER or 'none'}')...")
+    log(f"Discovering campaigns (filter: '{CAMPAIGN_FILTER or 'none — all campaigns'}')...")
     cutoff = datetime.now(timezone.utc) - timedelta(days=ACTIVE_WINDOW_DAYS)
 
     # Parse filter keywords
@@ -127,32 +126,23 @@ def discover_active_campaigns():
 
     log(f"  Total campaigns in account: {len(campaigns)}")
 
-    active = []
+    if not CAMPAIGN_FILTER:
+        result = [(c.get("id"), c.get("name", "(unnamed)")) for c in campaigns if c.get("id")]
+        log(f"  No filter applied — returning all {len(result)} campaigns")
+        return result
+
+    keywords = [k.strip().lower() for k in CAMPAIGN_FILTER.split(",")]
+    filtered = []
     for c in campaigns:
-        status = c.get("status", "")
-        updated_at = parse_iso(c.get("updated_at", ""))
-        cid = c.get("id")
-        cname = c.get("name", "(unnamed)")
+        name = (c.get("name") or "").lower()
+        if any(kw in name for kw in keywords):
+            filtered.append((c.get("id"), c.get("name", "(unnamed)")))
 
-        if status != "ACTIVE":
-            continue
-
-        if updated_at and updated_at < cutoff:
-            continue
-
-        # Apply campaign name filter
-        if keywords:
-            name_lower = cname.lower()
-            if not any(kw in name_lower for kw in keywords):
-                continue
-
-        active.append((cid, cname))
-
-    log(f"  Active campaigns matching filter: {len(active)}")
-    for cid, cname in active:
+    log(f"  Matched {len(filtered)} campaigns for filter '{CAMPAIGN_FILTER}':")
+    for cid, cname in filtered:
         log(f"    - {cid}: {cname}")
 
-    return active
+    return filtered
 
 def sl_get(path, params=None):
     p = {"api_key": SMARTLEAD_API_KEY}
@@ -175,7 +165,12 @@ def ghl_get(path, params=None):
     raise RuntimeError(f"GHL request failed: {path}")
 
 
-def get_google_credentials():
+def get_sheet_id(sheets, sheet_name):
+    spreadsheet = sheets.spreadsheets().get(spreadsheetId=GOOGLE_SHEET_ID).execute()
+    for sheet in spreadsheet['sheets']:
+        if sheet['properties']['title'] == sheet_name:
+            return sheet['properties']['sheetId']
+    raise ValueError(f"Sheet '{sheet_name}' not found")
     if GOOGLE_SERVICE_ACCOUNT_JSON:
         import json, base64
         decoded = base64.b64decode(GOOGLE_SERVICE_ACCOUNT_JSON).decode()
@@ -289,7 +284,7 @@ def clear_range(sheets, range_str):
 
 def append_rows(sheets, tab_name, rows):
     if not rows: return
-    _sheets_call_with_retry(
+    response = _sheets_call_with_retry(
         lambda: sheets.spreadsheets().values().append(
             spreadsheetId=GOOGLE_SHEET_ID, range=f"{tab_name}!A:A",
             valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
@@ -297,6 +292,46 @@ def append_rows(sheets, tab_name, rows):
         ).execute(),
         label=f"append to {tab_name}",
     )
+    # Format the appended rows with black text on white background
+    if 'updates' in response and 'updatedRange' in response['updates']:
+        updated_range = response['updates']['updatedRange']
+        # Parse the range, e.g., 'Sheet1!A10:D15'
+        try:
+            sheet_name, range_str = updated_range.split('!')
+            start_col, start_row = range_str.split(':')[0], range_str.split(':')[0]
+            end_col, end_row = range_str.split(':')[1], range_str.split(':')[1]
+            # Convert to row numbers
+            start_row_num = int(''.join(filter(str.isdigit, start_row)))
+            end_row_num = int(''.join(filter(str.isdigit, end_row)))
+            format_range = f"{sheet_name}!A{start_row_num}:{end_col}{end_row_num}"
+            _sheets_call_with_retry(
+                lambda: sheets.spreadsheets().batchUpdate(
+                    spreadsheetId=GOOGLE_SHEET_ID,
+                    body={
+                        "requests": [{
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": get_sheet_id(sheets, sheet_name),
+                                    "startRowIndex": start_row_num - 1,
+                                    "endRowIndex": end_row_num,
+                                    "startColumnIndex": 0,
+                                    "endColumnIndex": 26  # A-Z
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}},
+                                        "backgroundColor": {"red": 1, "green": 1, "blue": 1}
+                                    }
+                                },
+                                "fields": "userEnteredFormat(textFormat,backgroundColor)"
+                            }
+                        }]
+                    }
+                ).execute(),
+                label=f"format {format_range}",
+            )
+        except Exception as e:
+            log(f"  Warning: Could not format appended rows: {e}")
 
 
 # === SmartLead pulls ===
@@ -932,7 +967,7 @@ def main():
     log(f"=== Started at {start.isoformat()} ===")
 
     # Discover which campaigns to sync (active + recently updated)
-    TRACKED_CAMPAIGNS = discover_active_campaigns()
+    TRACKED_CAMPAIGNS = discover_filtered_campaigns()
     if not TRACKED_CAMPAIGNS:
         log("No active campaigns found. Nothing to sync.")
         return
