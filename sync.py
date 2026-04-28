@@ -53,6 +53,8 @@ if _creds_in_client.exists():
 else:
     GOOGLE_CREDS_PATH = os.getenv("GOOGLE_CREDS_PATH", "./service-account.json")
 
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+
 # TRACKED_CAMPAIGNS is built dynamically — see discover_filtered_campaigns()
 
 GHL_CF_CAMPAIGN_ID = "IyS6bhX7hdUcg81AfRda"
@@ -158,10 +160,18 @@ def ghl_get(path, params=None):
     raise RuntimeError(f"GHL request failed: {path}")
 
 
+def get_google_credentials():
+    if GOOGLE_SERVICE_ACCOUNT_JSON:
+        import json
+        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        return service_account.Credentials.from_service_account_info(creds_dict, scopes=SHEETS_SCOPE)
+    else:
+        if not Path(GOOGLE_CREDS_PATH).exists():
+            raise FileNotFoundError(f"Service account JSON not found at {GOOGLE_CREDS_PATH}")
+        return service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH, scopes=SHEETS_SCOPE)
+
 def get_sheets_service():
-    creds = service_account.Credentials.from_service_account_file(
-        GOOGLE_CREDS_PATH, scopes=SHEETS_SCOPE
-    )
+    creds = get_google_credentials()
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 def read_config(sheets):
@@ -872,8 +882,10 @@ def main():
     if not ghl_enabled:
         log("NOTE: GHL credentials not provided — skipping GHL stages")
 
-    if not Path(GOOGLE_CREDS_PATH).exists():
-        log(f"ERROR Service account JSON not found at {GOOGLE_CREDS_PATH}")
+    try:
+        get_google_credentials()
+    except FileNotFoundError as e:
+        log(f"ERROR {e}")
         sys.exit(1)
 
     start = datetime.now(timezone.utc)
