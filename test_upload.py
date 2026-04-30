@@ -1,13 +1,12 @@
 """
-Cold Email Analytics — Daily Update Script (v2)
-=================================================
+Cold Email Analytics — Testing Script (Upload 3 Campaigns Only)
+=============================================================
 
-QUICK DAILY SYNC — only processes campaigns that are:
-  1. Status = ACTIVE
-  2. updated_at within the past 7 days
-  3. Match the CAMPAIGN_FILTER keyword (if set)
+This script is an EXACT twin of sync.py, with one single difference:
+It only processes the FIRST 3 campaigns found (after applying filters).
+Use this to verify data formatting and connection without a full sync.
 
-Usage: python update.py --client rainmaker
+Usage: python test_upload.py --client <client_name>
 """
 
 import os
@@ -24,7 +23,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 # --- Client selection ---
-parser = argparse.ArgumentParser(description="Daily update for a specific client")
+parser = argparse.ArgumentParser(description="Full sync for a specific client")
 parser.add_argument("--client", required=True, help="Client folder name under clients/")
 args = parser.parse_args()
 
@@ -43,6 +42,7 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 CLIENT_NAME = os.getenv("CLIENT_NAME", args.client)
 CAMPAIGN_FILTER = os.getenv("CAMPAIGN_FILTER", "")
 
+# Service account JSON: check client folder first, fall back to .env path
 _creds_in_client = client_dir / "service-account.json"
 if _creds_in_client.exists():
     GOOGLE_CREDS_PATH = str(_creds_in_client)
@@ -51,10 +51,7 @@ else:
 
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-# How many days back to consider a campaign "recently active"
-ACTIVE_WINDOW_DAYS = 7
-
-# TRACKED_CAMPAIGNS is built dynamically at runtime — see discover_active_campaigns()
+# TRACKED_CAMPAIGNS is built dynamically — see discover_filtered_campaigns()
 
 GHL_CF_CAMPAIGN_ID = "IyS6bhX7hdUcg81AfRda"
 GHL_CF_CALL_PROPOSED_AT = "SjdCvQ9cTILmG8MKqIyd"
@@ -118,12 +115,6 @@ def discover_filtered_campaigns():
     Returns list of (campaign_id, campaign_name) tuples.
     """
     log(f"Discovering campaigns (filter: '{CAMPAIGN_FILTER or 'none — all campaigns'}')...")
-    cutoff = datetime.now(timezone.utc) - timedelta(days=ACTIVE_WINDOW_DAYS)
-
-    # Parse filter keywords
-    keywords = []
-    if CAMPAIGN_FILTER:
-        keywords = [k.strip().lower() for k in CAMPAIGN_FILTER.split(",")]
 
     try:
         data = sl_get("/campaigns")
@@ -183,7 +174,6 @@ def get_google_credentials():
         if not Path(GOOGLE_CREDS_PATH).exists():
             raise FileNotFoundError(f"Service account JSON not found at {GOOGLE_CREDS_PATH}")
         return service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH, scopes=SHEETS_SCOPE)
-
 
 def get_sheets_service():
     creds = get_google_credentials()
@@ -356,7 +346,7 @@ def fetch_smartlead_stats():
       - positive_data: [Total Positive Replies]                                  -> col F
       - right_data:    [Total Bounced, Start Date, Sync Date]                    -> cols I:K
 
-    Columns E, G, H are FORMULAS:
+    Columns E, G, H are FORMULAS (installed by setup_stats_formulas.py):
       E: Reply Rate            = D/C
       G: Positive Reply Rate   = F/C  (from total sent)
       H: Positive Reply Rate   = F/D  (from total replies)
@@ -774,6 +764,7 @@ def dedupe_ghl_tab(sheets):
     except Exception as e:
         log(f"  WARN dedupe failed: {e}")
 
+
 def apply_custom_formatting(sheets):
     try:
         spreadsheet = sheets.spreadsheets().get(spreadsheetId=GOOGLE_SHEET_ID).execute()
@@ -840,25 +831,12 @@ def apply_custom_formatting(sheets):
 # === Campaign Overview auto-population ===========================
 def update_campaign_overview(sheets, tracked_campaigns):
     """
-    Auto-populates the Campaign Overview tab (columns A-D) with any
-    campaigns from tracked_campaigns that aren't already in the tab.
-    
-    Reads existing Campaign IDs from column A, compares against tracked_campaigns,
-    and adds missing ones. Sorts all rows by Launch Date (newest first).
-    
-    Also fetches status and created_at from SmartLead for each campaign
-    that needs to be added.
-    
-    Columns A-D are script-written:
-        A: Campaign ID
-        B: Campaign Launch Date
-        C: Campaign Status
-        D: Campaign Name
-    Columns E-N are formulas (already installed by setup_overview.py).
+    Auto-populates Campaign Overview tab columns A-D with any tracked campaigns
+    not already present. Sorts by Launch Date (newest first). Updates status
+    for existing campaigns.
     """
     log("=== STAGE 6: Campaign Overview ===")
     
-    # Read existing Campaign IDs from Overview tab
     try:
         result = sheets.spreadsheets().values().get(
             spreadsheetId=GOOGLE_SHEET_ID,
@@ -875,7 +853,6 @@ def update_campaign_overview(sheets, tracked_campaigns):
     
     log(f"  Existing campaigns in Overview: {len(existing_ids)}")
     
-    # Find campaigns that need to be added
     new_campaigns = []
     for cid, cname in tracked_campaigns:
         if str(cid) not in existing_ids:
@@ -883,13 +860,11 @@ def update_campaign_overview(sheets, tracked_campaigns):
     
     if not new_campaigns:
         log("  All tracked campaigns already in Overview, nothing to add")
-        # Still update status and dates for existing campaigns
         _refresh_overview_metadata(sheets, existing_rows, tracked_campaigns)
         return
     
     log(f"  Adding {len(new_campaigns)} new campaign(s) to Overview")
     
-    # Fetch metadata (status, created_at) for new campaigns from SmartLead
     new_rows = []
     for cid, cname in new_campaigns:
         try:
@@ -905,19 +880,15 @@ def update_campaign_overview(sheets, tracked_campaigns):
         new_rows.append([str(cid), launch_date, status, cname])
         log(f"    + {cid}: {cname} ({status}, {launch_date})")
     
-    # Merge with existing rows
     all_rows = []
     for row in existing_rows:
-        # Pad to 4 columns
         while len(row) < 4:
             row.append("")
         all_rows.append(row)
     all_rows.extend(new_rows)
     
-    # Sort by Launch Date (column B, index 1) descending — newest first
     all_rows.sort(key=lambda r: r[1] if len(r) > 1 and r[1] else "", reverse=True)
     
-    # Write back columns A-D
     if all_rows:
         clear_range(sheets, "Campaign Overview!A3:D500")
         update_range(sheets, f"Campaign Overview!A3:D{3 + len(all_rows) - 1}", all_rows)
@@ -926,10 +897,6 @@ def update_campaign_overview(sheets, tracked_campaigns):
 
 
 def _refresh_overview_metadata(sheets, existing_rows, tracked_campaigns):
-    """
-    Update status and launch date for campaigns already in the Overview tab
-    (in case status changed from ACTIVE to PAUSED, etc.)
-    """
     tracked_map = {}
     for cid, cname in tracked_campaigns:
         try:
@@ -1034,23 +1001,26 @@ def main():
         sys.exit(1)
 
     start = datetime.now(timezone.utc)
-    log(f"=== UPDATE started for client: {CLIENT_NAME} ===")
+    log(f"=== TEST SYNC started for client: {CLIENT_NAME} ===")
     log(f"=== Started at {start.isoformat()} ===")
 
-    # Discover which campaigns to sync (active + recently updated)
+    # Discover campaigns based on CAMPAIGN_FILTER
     TRACKED_CAMPAIGNS = discover_filtered_campaigns()
+    
+    # --- TEST LIMIT: Only process 3 campaigns ---
+    TRACKED_CAMPAIGNS = TRACKED_CAMPAIGNS[:3]
+    
     if not TRACKED_CAMPAIGNS:
-        log("No active campaigns found. Nothing to sync.")
+        log("No campaigns found matching filter. Nothing to sync.")
         return
 
-    log(f"=== Processing {len(TRACKED_CAMPAIGNS)} active campaign(s) ===")
+    log(f"=== TEST MODE: Processing {len(TRACKED_CAMPAIGNS)} campaign(s) ===")
 
     sheets = get_sheets_service()
     config = read_config(sheets)
-
-    # update.py always runs incremental — never clears existing data
-    is_first_run = False
-    log("Mode: INCREMENTAL (update.py always appends, never clears)")
+    last_sync = parse_iso(config.get("last_synced_at", ""))
+    is_first_run = last_sync is None
+    log(f"Mode: {'FIRST RUN' if is_first_run else 'INCREMENTAL'}")
 
     try:
         existing_reply_keys = set() if is_first_run else read_existing_reply_keys(sheets)
@@ -1068,57 +1038,20 @@ def main():
         # ─── STAGE 1: Campaign Overview (most important, do first) ──
         update_campaign_overview(sheets, TRACKED_CAMPAIGNS)
 
-        # ─── STAGE 2: Stats (only updates active campaigns, preserves others) ──
+        # ─── STAGE 2: Stats (fast) ──────────────────────────────
         log("=== STAGE 2: SmartLead Stats ===")
         stats_left, stats_positive, stats_right = fetch_smartlead_stats()
-
-        # Read existing stats to preserve rows for non-active campaigns
-        try:
-            existing_stats = sheets.spreadsheets().values().get(
-                spreadsheetId=GOOGLE_SHEET_ID,
-                range="Raw SmartLead Stats!A2:K252",
-            ).execute().get("values", [])
-        except Exception:
-            existing_stats = []
-
-        # Build a map of campaign_id -> row index for existing data
-        existing_by_id = {}
-        for i, row in enumerate(existing_stats):
-            if row and row[0]:
-                existing_by_id[str(row[0])] = i
-
-        # Merge: update existing rows or append new ones
-        for j in range(len(stats_left)):
-            cid = str(stats_left[j][0])
-            # Build a full 11-column row:
-            # A-D from left, E empty (formula), F from positive,
-            # G empty (formula), H empty (formula), I-K from right
-            full_row = stats_left[j] + [""] + [stats_positive[j][0]] + ["", ""] + stats_right[j]
-            # Pad to 11 columns
-            while len(full_row) < 11:
-                full_row.append("")
-
-            if cid in existing_by_id:
-                row_idx = existing_by_id[cid]
-                existing_stats[row_idx] = full_row
-            else:
-                existing_stats.append(full_row)
-
-        # Write only the script-owned columns (A-D, F, I-K), skip E, G, H (formulas)
-        if existing_stats:
-            left_rows = [[r[0] if len(r) > 0 else "", r[1] if len(r) > 1 else "",
-                          r[2] if len(r) > 2 else "", r[3] if len(r) > 3 else ""]
-                         for r in existing_stats]
-            pos_rows = [[r[5] if len(r) > 5 else ""] for r in existing_stats]
-            right_rows = [[r[8] if len(r) > 8 else "", r[9] if len(r) > 9 else "",
-                           r[10] if len(r) > 10 else ""] for r in existing_stats]
-            n = len(existing_stats)
-            update_range(sheets, f"Raw SmartLead Stats!A2:D{n + 1}", left_rows)
-            update_range(sheets, f"Raw SmartLead Stats!F2:F{n + 1}", pos_rows)
-            update_range(sheets, f"Raw SmartLead Stats!I2:K{n + 1}", right_rows)
+        n_stats = len(stats_left)
+        if n_stats > 0:
+            clear_range(sheets, f"Raw SmartLead Stats!A2:D{n_stats + 50}")
+            clear_range(sheets, f"Raw SmartLead Stats!F2:F{n_stats + 50}")
+            clear_range(sheets, f"Raw SmartLead Stats!I2:K{n_stats + 50}")
+            update_range(sheets, f"Raw SmartLead Stats!A2:D{n_stats + 1}", stats_left)
+            update_range(sheets, f"Raw SmartLead Stats!F2:F{n_stats + 1}", stats_positive)
+            update_range(sheets, f"Raw SmartLead Stats!I2:K{n_stats + 1}", stats_right)
             # Install formulas for E, G, H (every run to ensure they're always present)
-            install_stats_formulas(sheets, n + 50)
-        log(f"  Updated stats for {len(stats_left)} active campaigns ({len(existing_stats)} total in sheet)")
+            install_stats_formulas(sheets, n_stats + 50)
+        log(f"  Wrote {n_stats} stats rows")
 
         # ─── STAGE 3: Sequences (fast) ────────────────────────────
         log("=== STAGE 3: SmartLead Sequences ===")
@@ -1135,10 +1068,14 @@ def main():
                 cat_id = str(row[8])
                 row[8] = categories.get(cat_id, cat_id)
 
-        append_rows(sheets, "Raw SmartLead Replies", sl_replies)
-        log(f"  Appended {len(sl_replies)} new reply rows")
+        if is_first_run:
+            clear_range(sheets, "Raw SmartLead Replies!A2:ZZ")
+            update_range(sheets, "Raw SmartLead Replies!A2", sl_replies)
+        else:
+            append_rows(sheets, "Raw SmartLead Replies", sl_replies)
+        log(f"  Wrote {len(sl_replies)} reply rows")
 
-        # Save progress marker
+        # Save progress marker so if GHL section fails, replies are preserved
         partial_now = get_now_sast_str()
         write_config(sheets, {
             "last_synced_at": partial_now,
@@ -1155,8 +1092,12 @@ def main():
             stages = fetch_ghl_pipeline_stages()
             ghl_opps = fetch_ghl_opportunities(stages, existing_ghl_emails, is_first_run)
 
-            append_rows(sheets, "Raw GHL Data", ghl_opps)
-            log(f"  Appended {len(ghl_opps)} new GHL rows")
+            if is_first_run:
+                clear_range(sheets, "Raw GHL Data!A2:ZZ")
+                update_range(sheets, "Raw GHL Data!A2", ghl_opps)
+            else:
+                append_rows(sheets, "Raw GHL Data", ghl_opps)
+            log(f"  Wrote {len(ghl_opps)} GHL rows")
         else:
             log("=== STAGE 4: GHL Data — SKIPPED (no credentials) ===")
 
@@ -1175,12 +1116,12 @@ def main():
             "last_synced_at": now,
             "smartlead_last_sync": now,
             "ghl_last_sync": now,
-            "sync_status": f"Success - {len(sl_replies)} new replies, {len(ghl_opps)} new opps",
+            "sync_status": f"TEST SUCCESS - {len(sl_replies)} new replies, {len(ghl_opps)} new opps",
             "next_scheduled_sync": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
         })
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
-        log(f"DONE Sync complete in {elapsed:.1f}s ({elapsed/60:.1f} min)")
+        log(f"DONE Test sync complete in {elapsed:.1f}s ({elapsed/60:.1f} min)")
 
     except Exception as e:
         log(f"ERROR Sync failed: {e}")

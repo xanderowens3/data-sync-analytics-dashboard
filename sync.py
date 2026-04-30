@@ -97,11 +97,19 @@ def strip_html(raw):
 
 def parse_iso(s):
     if not s: return None
+    # Support both new SAST format and old ISO format
+    if " SAST" in s:
+        try: return datetime.strptime(s.replace(" SAST", ""), "%Y-%m-%d %H:%M:%S")
+        except: return None
     try:
         s = s.replace("Z", "+00:00")
         return datetime.fromisoformat(s)
     except Exception:
         return None
+
+def get_now_sast_str():
+    now_sast = datetime.now(timezone.utc) + timedelta(hours=2)
+    return now_sast.strftime("%Y-%m-%d %H:%M:%S") + " SAST"
 
 
 def discover_filtered_campaigns():
@@ -364,7 +372,7 @@ def fetch_smartlead_stats():
             lead_stats = data.get("campaign_lead_stats", {}) or {}
             interested = int(lead_stats.get("interested", 0) or 0)
 
-            left_data.append([cid, cname, sent, replies])
+            left_data.append([str(cid), cname, sent, replies])
             positive_data.append([interested])
             right_data.append([bounces, start_date, sync_date])
 
@@ -487,7 +495,7 @@ def fetch_smartlead_replies(existing_keys, is_first_run):
                     seq_step = m.get("email_seq_number", "")
 
                     rows.append([
-                        cid,                    # A: Campaign ID
+                        str(cid),                    # A: Campaign ID
                         cname,                  # B: Campaign Name
                         email,                  # C: Lead Email
                         lead_name,              # D: Lead Name
@@ -543,7 +551,7 @@ def fetch_smartlead_sequences():
                 variants = step.get("sequence_variants", [])
                 if not variants:
                     rows.append([
-                        cid, cname, seq_number,
+                        str(cid), cname, seq_number,
                         step.get("subject", ""),
                         strip_html(step.get("email_body", ""))[:2000],
                         delay, "", sync_date,
@@ -552,7 +560,7 @@ def fetch_smartlead_sequences():
                     for v in variants:
                         if v.get("is_deleted"): continue
                         rows.append([
-                            cid, cname, seq_number,
+                            str(cid), cname, seq_number,
                             v.get("subject", ""),
                             strip_html(v.get("email_body", ""))[:2000],
                             delay,
@@ -761,6 +769,69 @@ def dedupe_ghl_tab(sheets):
         log(f"  WARN dedupe failed: {e}")
 
 
+def apply_custom_formatting(sheets):
+    try:
+        spreadsheet = sheets.spreadsheets().get(spreadsheetId=GOOGLE_SHEET_ID).execute()
+        sheet_ids = {}
+        for s in spreadsheet.get("sheets", []):
+            sheet_ids[s["properties"]["title"]] = s["properties"]["sheetId"]
+            
+        requests = []
+        
+        if "Campaign Overview" in sheet_ids:
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_ids["Campaign Overview"],
+                        "startRowIndex": 2,
+                        "startColumnIndex": 3,
+                        "endColumnIndex": 4
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "wrapStrategy": "CLIP",
+                            "horizontalAlignment": "LEFT"
+                        }
+                    },
+                    "fields": "userEnteredFormat(wrapStrategy,horizontalAlignment)"
+                }
+            })
+            
+        for tab_name in ["Raw SmartLead Replies", "Raw SmartLead Sequences"]:
+            if tab_name in sheet_ids:
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_ids[tab_name],
+                            "startRowIndex": 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 20
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
+                                "textFormat": {
+                                    "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0},
+                                    "fontFamily": "Arial",
+                                    "fontSize": 11,
+                                    "bold": False
+                                }
+                            }
+                        },
+                        "fields": "userEnteredFormat(backgroundColor,textFormat)"
+                    }
+                })
+                
+        if requests:
+            sheets.spreadsheets().batchUpdate(
+                spreadsheetId=GOOGLE_SHEET_ID,
+                body={"requests": requests}
+            ).execute()
+            log("  Applied custom formatting (Campaign Overview, Replies, Sequences)")
+            
+    except Exception as e:
+        log(f"  WARN Could not apply custom formatting: {e}")
+
 # === Campaign Overview auto-population ===========================
 def update_campaign_overview(sheets, tracked_campaigns):
     """
@@ -865,6 +936,50 @@ def _refresh_overview_metadata(sheets, existing_rows, tracked_campaigns):
         update_range(sheets, f"Campaign Overview!A3:D{3 + len(existing_rows) - 1}", existing_rows)
         log("  Updated status/dates for existing campaigns")
 
+def install_overview_formulas(sheets, max_row=500):
+    log(f"Installing Overview formulas (rows 3 to {max_row})...")
+    rows = []
+    for i in range(3, max_row + 1):
+        # A:ID, B:Date, C:Status, D:Name
+        # E: Total Sent, F: Total Replies, G: Reply Rate, H: Positive Replies, I: Pos Rate, J: Act Pos Rate, K: Emails/Pos
+        # L: Calls Proposed, M: Day 1, N: Day 2, O: Calls Booked, P: Booking Rate
+        row = [
+            f"=IF(A{i}=\"\",\"\",IFERROR(VLOOKUP(A{i},'Raw SmartLead Stats'!A:C,3,FALSE),0))",      # E: Sent
+            f"=IF(A{i}=\"\",\"\",IFERROR(VLOOKUP(A{i},'Raw SmartLead Stats'!A:D,4,FALSE),0))",      # F: Replies
+            f"=IF(OR(A{i}=\"\",E{i}=0),\"\",F{i}/E{i})",                                           # G: Reply Rate
+            f"=IF(A{i}=\"\",\"\",IFERROR(VLOOKUP(A{i},'Raw SmartLead Stats'!A:F,6,FALSE),0))",      # H: Positive
+            f"=IF(OR(A{i}=\"\",F{i}=0),\"\",H{i}/F{i})",                                           # I: Pos Rate
+            f"=IF(OR(A{i}=\"\",E{i}=0),\"\",H{i}/E{i})",                                           # J: Act Pos Rate
+            f"=IF(OR(A{i}=\"\",H{i}=0),\"\",E{i}/H{i})",                                           # K: Emails/Pos
+            f"=IF(A{i}=\"\",\"\",COUNTIFS('Raw GHL Data'!C:C,A{i},'Raw GHL Data'!D:D,\"<>\"))",      # L: Calls Prop
+            f"=IF(A{i}=\"\",\"\",COUNTIFS('Raw GHL Data'!C:C,A{i},'Raw GHL Data'!E:E,\"<>\"))",      # M: Day 1
+            f"=IF(A{i}=\"\",\"\",COUNTIFS('Raw GHL Data'!C:C,A{i},'Raw GHL Data'!F:F,\"<>\"))",      # N: Day 2
+            f"=IF(A{i}=\"\",\"\",COUNTIFS('Raw GHL Data'!C:C,A{i},'Raw GHL Data'!G:G,\"<>\"))",      # O: Calls Booked
+            f"=IF(OR(A{i}=\"\",H{i}=0),\"\",O{i}/H{i})",                                           # P: Booking Rate
+        ]
+        rows.append(row)
+    
+    update_range(sheets, f"Campaign Overview!E3:P{max_row}", rows)
+    
+    # Format percentages (G, I, J, P)
+    try:
+        spreadsheet = sheets.spreadsheets().get(spreadsheetId=GOOGLE_SHEET_ID).execute()
+        sheet_id = None
+        for s in spreadsheet["sheets"]:
+            if s["properties"]["title"] == "Campaign Overview":
+                sheet_id = s["properties"]["sheetId"]
+                break
+        if sheet_id is not None:
+            pct = {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}}}
+            requests = [
+                {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": max_row, "startColumnIndex": 6, "endColumnIndex": 7}, "cell": pct, "fields": "userEnteredFormat.numberFormat"}},
+                {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": max_row, "startColumnIndex": 8, "endColumnIndex": 10}, "cell": pct, "fields": "userEnteredFormat.numberFormat"}},
+                {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 2, "endRowIndex": max_row, "startColumnIndex": 15, "endColumnIndex": 16}, "cell": pct, "fields": "userEnteredFormat.numberFormat"}},
+            ]
+            sheets.spreadsheets().batchUpdate(spreadsheetId=GOOGLE_SHEET_ID, body={"requests": requests}).execute()
+    except Exception as e:
+        log(f"  WARN Formatting failed: {e}")
+
 
 # === Main ===
 def main():
@@ -920,8 +1035,11 @@ def main():
         categories = fetch_smartlead_categories()
         log(f"  Loaded {len(categories)} category names")
 
-        # ─── STAGE 1: Stats (fast, write immediately) ─────────────
-        log("=== STAGE 1: SmartLead Stats ===")
+        # ─── STAGE 1: Campaign Overview (most important, do first) ──
+        update_campaign_overview(sheets, TRACKED_CAMPAIGNS)
+
+        # ─── STAGE 2: Stats (fast) ──────────────────────────────
+        log("=== STAGE 2: SmartLead Stats ===")
         stats_left, stats_positive, stats_right = fetch_smartlead_stats()
         n_stats = len(stats_left)
         if n_stats > 0:
@@ -935,15 +1053,15 @@ def main():
             install_stats_formulas(sheets, n_stats + 50)
         log(f"  Wrote {n_stats} stats rows")
 
-        # ─── STAGE 2: Sequences (fast, write immediately) ─────────
-        log("=== STAGE 2: SmartLead Sequences ===")
+        # ─── STAGE 3: Sequences (fast) ────────────────────────────
+        log("=== STAGE 3: SmartLead Sequences ===")
         sl_sequences = fetch_smartlead_sequences()
         clear_range(sheets, "Raw SmartLead Sequences!A2:ZZ")
         update_range(sheets, "Raw SmartLead Sequences!A2", sl_sequences)
         log(f"  Wrote {len(sl_sequences)} sequence rows")
 
-        # ─── STAGE 3: Replies (slow, write as we go per campaign) ─
-        log("=== STAGE 3: SmartLead Replies (this is the slow part) ===")
+        # ─── STAGE 4: Replies (slow) ──────────────────────────────
+        log("=== STAGE 4: SmartLead Replies (slow part) ===")
         sl_replies = fetch_smartlead_replies(existing_reply_keys, is_first_run)
         if categories:
             for row in sl_replies:
@@ -958,7 +1076,7 @@ def main():
         log(f"  Wrote {len(sl_replies)} reply rows")
 
         # Save progress marker so if GHL section fails, replies are preserved
-        partial_now = datetime.now(timezone.utc).isoformat()
+        partial_now = get_now_sast_str()
         write_config(sheets, {
             "last_synced_at": partial_now,
             "smartlead_last_sync": partial_now,
@@ -989,10 +1107,11 @@ def main():
         if ghl_enabled:
             dedupe_ghl_tab(sheets)
 
-        # ─── STAGE 6: Campaign Overview auto-populate ─────────────
-        update_campaign_overview(sheets, TRACKED_CAMPAIGNS)
+        # ─── STAGE 6: Apply Formatting & Formulas ─────────────────
+        apply_custom_formatting(sheets)
+        install_overview_formulas(sheets)
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = get_now_sast_str()
         write_config(sheets, {
             "last_synced_at": now,
             "smartlead_last_sync": now,

@@ -203,8 +203,8 @@ if overview_sheet_id is not None:
         {
             "repeatCell": {
                 "range": cell_range(3, 4),
-                "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP"}},
-                "fields": "userEnteredFormat.wrapStrategy",
+                "cell": {"userEnteredFormat": {"wrapStrategy": "CLIP", "horizontalAlignment": "LEFT"}},
+                "fields": "userEnteredFormat(wrapStrategy,horizontalAlignment)",
             }
         },
         # G: Reply Rate (%)
