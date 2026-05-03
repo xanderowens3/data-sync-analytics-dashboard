@@ -42,6 +42,7 @@ GHL_PIPELINE_ID = os.getenv("GHL_PIPELINE_ID")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 CLIENT_NAME = os.getenv("CLIENT_NAME", args.client)
 CAMPAIGN_FILTER = os.getenv("CAMPAIGN_FILTER", "")
+CAMPAIGN_EXCLUDE = os.getenv("CAMPAIGN_EXCLUDE", "")
 
 _creds_in_client = client_dir / "service-account.json"
 if _creds_in_client.exists():
@@ -134,19 +135,22 @@ def discover_filtered_campaigns():
 
     log(f"  Total campaigns in account: {len(campaigns)}")
 
-    if not CAMPAIGN_FILTER:
-        result = [(c.get("id"), c.get("name", "(unnamed)")) for c in campaigns if c.get("id")]
-        log(f"  No filter applied — returning all {len(result)} campaigns")
-        return result
+    keywords = [k.strip().lower() for k in CAMPAIGN_FILTER.split(",")] if CAMPAIGN_FILTER else []
+    excludes = [k.strip().lower() for k in CAMPAIGN_EXCLUDE.split(",")] if CAMPAIGN_EXCLUDE else []
 
-    keywords = [k.strip().lower() for k in CAMPAIGN_FILTER.split(",")]
     filtered = []
     for c in campaigns:
         name = (c.get("name") or "").lower()
-        if any(kw in name for kw in keywords):
-            filtered.append((c.get("id"), c.get("name", "(unnamed)")))
+        
+        if excludes and any(ex in name for ex in excludes):
+            continue
+            
+        if keywords and not any(kw in name for kw in keywords):
+            continue
+            
+        filtered.append((c.get("id"), c.get("name", "(unnamed)")))
 
-    log(f"  Matched {len(filtered)} campaigns for filter '{CAMPAIGN_FILTER}':")
+    log(f"  Matched {len(filtered)} campaigns (Filter: '{CAMPAIGN_FILTER}', Exclude: '{CAMPAIGN_EXCLUDE}'):")
     for cid, cname in filtered:
         log(f"    - {cid}: {cname}")
 
@@ -1023,9 +1027,15 @@ def main():
         log(f"ERROR Missing required env vars: {missing}")
         sys.exit(1)
 
-    ghl_enabled = bool(GHL_PRIVATE_TOKEN and GHL_LOCATION_ID and GHL_PIPELINE_ID)
-    if not ghl_enabled:
-        log("NOTE: GHL credentials not provided — skipping GHL stages")
+    ghl_enabled = True
+    missing_ghl = []
+    if not GHL_PRIVATE_TOKEN: missing_ghl.append("GHL_PRIVATE_TOKEN")
+    if not GHL_LOCATION_ID: missing_ghl.append("GHL_LOCATION_ID")
+    if not GHL_PIPELINE_ID: missing_ghl.append("GHL_PIPELINE_ID")
+    
+    if missing_ghl:
+        ghl_enabled = False
+        log(f"NOTE: GHL stage disabled. Missing variables: {', '.join(missing_ghl)}")
 
     try:
         get_google_credentials()
@@ -1130,10 +1140,15 @@ def main():
         # ─── STAGE 4: Replies (slow) ──────────────────────────────
         log("=== STAGE 4: SmartLead Replies (slow part) ===")
         sl_replies = fetch_smartlead_replies(existing_reply_keys, is_first_run)
-        if categories:
-            for row in sl_replies:
-                cat_id = str(row[8])
-                row[8] = categories.get(cat_id, cat_id)
+        # Translate categories and filter out unwanted replies
+        filtered_replies = []
+        for row in sl_replies:
+            cat_id = str(row[8])
+            cat_name = categories.get(cat_id, cat_id) if categories else cat_id
+            row[8] = cat_name
+            if cat_name.lower() not in ["sender originated bounce", "out of office"]:
+                filtered_replies.append(row)
+        sl_replies = filtered_replies
 
         append_rows(sheets, "Raw SmartLead Replies", sl_replies)
         log(f"  Appended {len(sl_replies)} new reply rows")
